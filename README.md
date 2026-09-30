@@ -73,7 +73,9 @@ simulated sensor and saves nothing.
 | --- | --- |
 | Laptop | Dell Inspiron 14 7425 2-in-1 |
 | Fingerprint sensor | Goodix MOC Fingerprint Sensor (match-on-chip, press type), USB ID `27c6:639c`, firmware 01010274 |
-| System | Ubuntu 26.04 LTS, GNOME on Wayland |
+| Linux distribution | Ubuntu 26.04.1 LTS (Resolute Raccoon), x86_64 |
+| Linux kernel | 7.0.0-34-generic |
+| Desktop | GNOME Shell 50.1 on Wayland |
 | Fingerprint stack | fprintd 1.94.5, libfprint 1.95.1 |
 
 Other readers supported by fprintd should work but have not been tried.
