@@ -4,6 +4,9 @@ A small GTK app for Linux that guides you through enrolling fingerprints and the
 checks how well each one was recorded. It talks to [fprintd](https://fprint.freedesktop.org/),
 so it works with any reader that fprintd supports.
 
+**Linux only.** It does not run on Windows or macOS: those systems have no fprintd, and
+they keep fingerprint enrollment inside Windows Hello and Touch ID, where apps can't reach it.
+
 | Home | Enrolling |
 | --- | --- |
 | ![Home screen with both hands and a status dot per finger](screenshots/home.png) | ![Enrollment progress ring](screenshots/enroll.png) |
@@ -63,7 +66,17 @@ simulated sensor and saves nothing.
 - Re-enrolling a finger deletes its old print first, because readers that check for
   duplicates would otherwise reject it. If you cancel partway, that finger stays
   unenrolled until you enroll it again. The app warns before doing this.
-- Developed and tested on Ubuntu 26.04 with a Goodix match-on-chip reader.
+
+## Tested hardware
+
+| | |
+| --- | --- |
+| Laptop | Dell Inspiron 14 7425 2-in-1 |
+| Fingerprint sensor | Goodix MOC Fingerprint Sensor (match-on-chip, press type), USB ID `27c6:639c`, firmware 01010274 |
+| System | Ubuntu 26.04 LTS, GNOME on Wayland |
+| Fingerprint stack | fprintd 1.94.5, libfprint 1.95.1 |
+
+Other readers supported by fprintd should work but have not been tried.
 
 ## License
 
