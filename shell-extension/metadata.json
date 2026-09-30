@@ -1,0 +1,8 @@
+{
+  "uuid": "fingerprint-prompt@melhzy.github.io",
+  "name": "Fingerprint Prompt",
+  "description": "Makes the power button work like a MacBook's fingerprint button: a press locks the screen, and on the lock screen the unlock prompt opens by itself so a finger resting on the sensor unlocks. Turned on and off from Fingerprint Manager.",
+  "url": "https://github.com/melhzy/fingerprint-manager",
+  "shell-version": ["50"],
+  "session-modes": ["user", "unlock-dialog"]
+}

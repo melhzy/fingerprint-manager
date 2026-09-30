@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 
 import gi
@@ -18,6 +19,17 @@ APP_ID = "io.github.melhzy.FingerprintManager"
 FPRINT = "net.reactivated.Fprint"
 CALL_TIMEOUT_MS = 5 * 60 * 1000  # a call may sit behind a polkit password dialog
 TEST_ROUNDS = 5
+EXTENSION_UUID = "fingerprint-prompt@melhzy.github.io"
+EXTENSION_ERROR, EXTENSION_OUT_OF_DATE = 3, 4  # GNOME Shell's ExtensionState
+POWER_SCHEMA, POWER_KEY = "org.gnome.settings-daemon.plugins.power", "power-button-action"
+
+
+def gnome_settings(schema):
+    """A Gio.Settings for the schema, or None when not on GNOME or the schema is missing."""
+    on_gnome = "GNOME" in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":")
+    if on_gnome and Gio.SettingsSchemaSource.get_default().lookup(schema, True):
+        return Gio.Settings.new(schema)
+    return None
 
 # Left to right, as the hands are drawn.
 FINGERS = [
@@ -201,6 +213,105 @@ class Results:
     def keep_only(self, fingers):
         for finger in set(self.data) - set(fingers):
             self.drop(finger)
+
+
+class LockPrompt:
+    """The bundled GNOME Shell extension that keeps the sensor ready on the lock screen."""
+
+    def __init__(self):
+        self.source = os.path.join(os.path.dirname(os.path.realpath(__file__)), "shell-extension")
+        self.target = os.path.join(GLib.get_user_data_dir(), "gnome-shell", "extensions", EXTENSION_UUID)
+        self.settings = gnome_settings("org.gnome.shell")
+        self.available = self.settings is not None and os.path.isdir(self.source)
+
+    def _listed(self, key):
+        return EXTENSION_UUID in self.settings.get_strv(key)
+
+    def _set_listed(self, key, listed):
+        uuids = [uuid for uuid in self.settings.get_strv(key) if uuid != EXTENSION_UUID]
+        self.settings.set_strv(key, uuids + [EXTENSION_UUID] * listed)
+
+    @property
+    def enabled(self):
+        return (os.path.isdir(self.target) and self._listed("enabled-extensions")
+                and not self._listed("disabled-extensions"))
+
+    def set_enabled(self, enabled):
+        """Install and enable the extension, or disable and remove it. Raises OSError."""
+        if enabled:
+            shutil.copytree(self.source, self.target, dirs_exist_ok=True)
+        elif os.path.isdir(self.target):
+            shutil.rmtree(self.target)
+        self._set_listed("disabled-extensions", False)
+        self._set_listed("enabled-extensions", enabled)
+        Gio.Settings.sync()
+
+    def _changed_since_shell_started(self):
+        """Whether the installed files are newer than the GNOME Shell process, which loaded them at login."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+            (pid,) = bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                "GetConnectionUnixProcessID", GLib.Variant("(s)", ("org.gnome.Shell",)),
+                GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, 2000, None).unpack()
+            with open(f"/proc/{pid}/stat") as stat:
+                start_ticks = int(stat.read().rsplit(")", 1)[1].split()[19])
+            with open("/proc/stat") as stat:
+                boot_time = next(int(line.split()[1]) for line in stat if line.startswith("btime "))
+            shell_started = boot_time + start_ticks / os.sysconf("SC_CLK_TCK")
+            newest = max(os.path.getmtime(os.path.join(self.target, name)) for name in os.listdir(self.target))
+        except (GLib.Error, OSError, ValueError, IndexError, StopIteration):
+            return False
+        return newest > shell_started
+
+    def note(self):
+        """What still stands between the switch and a working prompt, or None."""
+        if not self.enabled:
+            return None
+        try:
+            (info,) = Gio.bus_get_sync(Gio.BusType.SESSION).call_sync(
+                "org.gnome.Shell", "/org/gnome/Shell", "org.gnome.Shell.Extensions", "GetExtensionInfo",
+                GLib.Variant("(s)", (EXTENSION_UUID,)), GLib.VariantType("(a{sv})"),
+                Gio.DBusCallFlags.NONE, 2000, None).unpack()
+        except GLib.Error:
+            return None
+        if not info:
+            # The shell only looks for new extensions when it starts.
+            return "Log out and back in to finish turning this on."
+        if self._changed_since_shell_started():
+            # ...and only reads their code then, too.
+            return "Log out and back in to load the update."
+        if info.get("state") == EXTENSION_OUT_OF_DATE:
+            return "This version of GNOME Shell isn't supported."
+        if info.get("state") == EXTENSION_ERROR:
+            return f"GNOME Shell couldn't load it: {info.get('error')}"
+        return None
+
+
+class PowerButton:
+    """What a power-button press does while the session is unlocked.
+
+    GNOME's own setting; "nothing" hands the press to the extension, which locks the screen.
+    """
+
+    def __init__(self):
+        self.settings = gnome_settings(POWER_SCHEMA)
+        self.available = self.settings is not None
+
+    @property
+    def locks(self):
+        return self.settings.get_string(POWER_KEY) == "nothing"
+
+    def set_locks(self, locks):
+        if locks:
+            self.settings.set_string(POWER_KEY, "nothing")
+        else:
+            self.settings.reset(POWER_KEY)
+        Gio.Settings.sync()
+
+    def watch(self, callback):
+        """Call back when the setting changes elsewhere, e.g. in GNOME Settings."""
+        self.settings.connect(f"changed::{POWER_KEY}", lambda *_: callback())
 
 
 def faded(color, alpha):
@@ -715,10 +826,12 @@ def card(child):
 
 
 class Window(Adw.ApplicationWindow):
-    def __init__(self, app, make_device, results):
+    def __init__(self, app, make_device, results, lock_prompt, power_button):
         super().__init__(application=app, title="Fingerprints", default_width=660, default_height=720)
         self.make_device = make_device
         self.results = results
+        self.lock_prompt = lock_prompt
+        self.power_button = power_button
         self.device = None
         self.enrolled = []
         self.selected = RECOMMENDED[0]
@@ -783,11 +896,69 @@ class Window(Adw.ApplicationWindow):
                           margin_top=18, margin_bottom=18, margin_start=18, margin_end=18)
         for child in (card(next_row), self.hands, legend, card(finger_box)):
             content.append(child)
+        if self.lock_prompt.available or self.power_button.available:
+            content.append(self.build_lock_group())
         scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
                                       child=Adw.Clamp(maximum_size=640, child=content))
         view = Adw.ToolbarView(content=scroller)
         view.add_top_bar(Adw.HeaderBar(title_widget=Adw.WindowTitle(title="Fingerprints", subtitle=self.device.name)))
         return Adw.NavigationPage(title="Fingerprints", child=view)
+
+    def build_lock_group(self):
+        group = Adw.PreferencesGroup(title="Lock screen")
+        if self.lock_prompt.available:
+            self.prompt_row = Adw.SwitchRow(title="Sensor ready whenever the lock screen is on",
+                                            active=self.lock_prompt.enabled)
+            self.prompt_handler = self.prompt_row.connect("notify::active", self.on_prompt_toggled)
+            self.update_prompt_row()
+            group.add(self.prompt_row)
+        if self.power_button.available:
+            self.power_row = Adw.SwitchRow(title="Power button locks the screen")
+            self.power_handler = self.power_row.connect(
+                "notify::active", lambda row, _p: self.power_button.set_locks(row.get_active()))
+            self.power_button.watch(self.update_power_row)
+            self.update_power_row()
+            group.add(self.power_row)
+        return group
+
+    def prompt_working(self):
+        """Whether the lock screen extension is loaded and running."""
+        return self.lock_prompt.available and self.lock_prompt.enabled and self.lock_prompt.note() is None
+
+    def update_power_row(self):
+        text = ("A press while you work locks the screen, as on a Mac. Music keeps playing, and the next press "
+                "with your finger on the sensor unlocks. Off restores the default action, which on Ubuntu is "
+                "the Power Off dialog (Power Button Behavior in GNOME Settings).")
+        working = self.prompt_working()
+        if not working:
+            text += "\nAvailable once the switch above is working."
+        self.power_row.set_subtitle(text)
+        self.power_row.set_sensitive(working)
+        with self.power_row.handler_block(self.power_handler):
+            self.power_row.set_active(self.power_button.locks)
+
+    def update_prompt_row(self):
+        text = ("GNOME only listens for a finger while the password page is showing. With this on, that page "
+                "opens as soon as the screen locks, lights up or wakes, so a finger resting on the sensor "
+                "unlocks the computer. The power button opens it too, and can't sleep or turn off a locked "
+                "computer. The password keeps working.")
+        note = self.lock_prompt.note()
+        if note:
+            text += "\n" + GLib.markup_escape_text(note)
+        self.prompt_row.set_subtitle(text)
+
+    def on_prompt_toggled(self, row, _pspec):
+        try:
+            self.lock_prompt.set_enabled(row.get_active())
+        except OSError as e:
+            self.toast(f"Couldn't change the lock screen setting: {e.strerror}")
+            with row.handler_block(self.prompt_handler):
+                row.set_active(self.lock_prompt.enabled)
+        self.update_prompt_row()
+        if self.power_button.available:
+            if not self.lock_prompt.enabled and self.power_button.locks:
+                self.power_button.set_locks(False)
+            self.update_power_row()
 
     def toast(self, text):
         self.toasts.add_toast(Adw.Toast(title=text))
@@ -934,11 +1105,11 @@ class App(Adw.Application):
     def do_activate(self):
         win = self.get_active_window()
         if not win and self.demo:
-            from demo_device import DemoDevice
-            win = Window(self, DemoDevice, Results(None))
+            from demo_device import DemoDevice, DemoLockPrompt, DemoPowerButton
+            win = Window(self, DemoDevice, Results(None), DemoLockPrompt(), DemoPowerButton())
         elif not win:
             path = os.path.join(GLib.get_user_data_dir(), "fingerprint-manager", "results.json")
-            win = Window(self, Device, Results(path))
+            win = Window(self, Device, Results(path), LockPrompt(), PowerButton())
         win.present()
 
 

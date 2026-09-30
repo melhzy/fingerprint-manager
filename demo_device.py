@@ -72,3 +72,29 @@ class DemoDevice:
             return False
         self.timer = GLib.timeout_add(self.STEP_MS, tick)
         return ()
+
+
+class DemoLockPrompt:
+    """Stands in for the lock screen switch. Changes nothing on the system."""
+
+    available = True
+    enabled = False
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+
+    def note(self):
+        return None
+
+
+class DemoPowerButton:
+    """Stands in for the power button switch. Changes nothing on the system."""
+
+    available = True
+    locks = False
+
+    def set_locks(self, locks):
+        self.locks = locks
+
+    def watch(self, callback):
+        pass
