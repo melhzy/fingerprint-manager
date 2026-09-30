@@ -120,6 +120,12 @@ Good to know:
   `/etc/pam.d/gdm-password` replace `@include common-auth` with
   `@include common-auth-nofprint`. Fingerprints keep working for `sudo` and admin
   prompts, which still use `common-auth`.
+- GNOME's own fingerprint service on the lock screen gives up after 30 seconds: leave the
+  prompt open that long and a resting finger does nothing until you press the button
+  again. A Mac keeps listening. To do the same, as root, in `/etc/pam.d/gdm-fingerprint`
+  change the line `auth required pam_fprintd.so` to
+  `auth required pam_fprintd.so timeout=-1` (back the file up first). Three failed
+  touches still hand over to the password, as on a Mac.
 - The extension declares support for GNOME Shell 50, the only version it was tried on. The
   switches are hidden on other desktops.
 
